@@ -1,6 +1,6 @@
 __pycache__/
 reports/
 
-
+config.json
 page.html
 rss_state.db
