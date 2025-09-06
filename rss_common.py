@@ -539,228 +539,155 @@ def _jsonld_get(o: dict, *paths) -> str | None:
         if ok and isinstance(cur, (str,int,float)):
             return str(cur).strip()
     return None
+
+
+# —— 可调：类型显式映射（小写键 -> 规范值）——
+NATURE_TYPE_MAP = {
+    "article": "Article",
+    "research article": "Article",
+    "review article": "Review",
+    "review": "Review",
+    "brief communication": "Brief Communication",
+    "letter": "Letter",
+    "analysis": "Analysis",
+    "perspective": "Perspective",
+    "correspondence": "Correspondence",
+    "editorial": "Editorial",
+    "comment": "Comment",
+    "news": "News",
+    "news & views": "News & Views",
+    "research highlight": "Research Highlight",
+    "careers": "Careers",
+}
+
+
 def _extract_nature_fields(html: str, url: str) -> dict | None:
     """
-    专用解析：Nature 主站/子刊的 News/Research Highlight/Article。
-    返回与你现有 extract_article_fields 一致的字段键：
-      title, abstract, journal, type, date_published, doi, article_url, raw_jsonld
+    严格版：仅针对 Nature 主站/子刊详情页。
+    - 不读取 JSON-LD，不做广义兜底。
+    - 仅使用 citation_* meta、breadcrumb、publication-history <time datetime>。
+    返回字段：
+      title, abstract, journal, type, date_published, doi, article_url, raw_jsonld(None)
     """
-    art_type = ""   # 避免后续引用未赋值
     soup = BeautifulSoup(html, "html.parser")
 
-    # --- 小工具：判定日期完整性/规范化 ---
-    def _is_full_ymd(s: str | None) -> bool:
-        if not s:
-            return False
-        return _re.match(r'^\d{4}-\d{2}-\d{2}$', s) is not None
+    # --- 小工具：取 meta 内容 ---
+    def _get_meta(name: str, prop: bool = False) -> str | None:
+        if prop:
+            tag = soup.find("meta", attrs={"property": name})
+        else:
+            tag = soup.find("meta", attrs={"name": name})
+        if tag and tag.get("content"):
+            s = tag["content"].strip()
+            return s or None
+        return None
 
-    def _is_incomplete_date(s: str | None) -> bool:
-        # 为空、仅到年-月、或非标准形式，都视为“不完整”
-        if not s:
-            return True
-        # 常见：YYYY/MM、YYYY-MM、YYYY.MM、YYYY年MM月
-        if _re.match(r'^\d{4}[-/\.]\d{2}$', s):
-            return True
-        if _re.match(r'^\d{4}-\d{2}-\d{2}$', s):
-            return False
-        # 其它杂格式交给 _parse_date_human 再判
-        maybe = _parse_date_human(s.replace('/', '-'))
-        return not _is_full_ymd(maybe)
-
-    def _normalize_date_keep_precision(s: str | None) -> str | None:
-        """
-        仅做轻度规范化：把分隔符统一成 '-'，尝试解析。
-        - 若能解析出 YYYY-MM-DD，返回该格式
-        - 若只能解析到年或年-月，不强行猜测“日”，保持原样（但替换为 '-'）
-        """
-        if not s:
+    # --- 小工具：取文本 ---
+    def _text_of(elem) -> str | None:
+        if not elem:
             return None
-        s2 = s.strip().replace('/', '-').replace('.', '-')
-        # 先直接命中 YYYY-MM-DD
-        if _is_full_ymd(s2):
-            return s2
-        # 尝试人类日期解析（如 "27 August 2025"）
-        maybe = _parse_date_human(s2)
-        if _is_full_ymd(maybe):
-            return maybe
-        # 无法补齐“日”，尽量保持原意（到月/到年）
-        # 规整成 YYYY-MM 或 YYYY
-        m = _re.match(r'^(\d{4})-(\d{2})$', s2)
-        if m:
-            return f"{m.group(1)}-{m.group(2)}"
-        m = _re.match(r'^(\d{4})$', s2)
-        if m:
-            return m.group(1)
-        return s2 or None
+        txt = elem.get_text(" ", strip=True)
+        return txt or None
 
-    # 1) 先尝试 meta[citation_*]（Nature Portfolio 很常见）
-    title = _get_meta(soup, "citation_title") or _get_meta(soup, "dc.title")
-    abstract = (_get_meta(soup, "dc.description") or
-                _get_meta(soup, "description") or
-                None)
-    doi = (_get_meta(soup, "citation_doi") or
-           _get_meta(soup, "dc.identifier") or
-           None)
-    journal = (_get_meta(soup, "citation_journal_title") or
-               _get_meta(soup, "prism.publicationName") or
-               None)
-    art_type = (_get_meta(soup, "citation_article_type") or
-                None)
-    date_pub = (_get_meta(soup, "citation_online_date") or
-                _get_meta(soup, "prism.publicationDate") or
-                _get_meta(soup, "article:published_time", prop=True) or
-                None)
+    # --- 标题 ---
+    h1 = soup.find("h1", attrs={"data-test": _re.compile(r"article-title", _re.I)}) \
+         or soup.find("h1", class_=_re.compile(r"\bc-article-title\b"))
+    title = _text_of(h1) or _get_meta("citation_title") or _get_meta("dc.title")
 
-    # 2) JSON-LD（可给出 @type / datePublished / isPartOf.name / identifier 等）
-    raw_jsonld = None
-    try:
-        jsonlds = _extract_jsonld_candidates(soup)
-        if jsonlds:
-            raw_jsonld = _json.dumps(jsonlds, ensure_ascii=False)
-            art = _jsonld_pick_article(jsonlds)
-            if art:
-                title = title or art.get("headline") or art.get("name")
-                # 仅当现有 date_pub 为空或不完整时，才用 JSON-LD 的 datePublished 升级
-                jp = art.get("datePublished")
-                if jp and _is_incomplete_date(date_pub):
-                    date_pub = jp
-                # 期刊/站点名：isPartOf.name / publisher.name / journal.name
-                journal = journal or _jsonld_get(art, ("isPartOf","name")) or _jsonld_get(art, ("publisher","name")) or _jsonld_get(art, ("journal","name"))
-                # DOI：identifier 可能是字符串或对象
-                cand_doi = art.get("identifier")
-                if isinstance(cand_doi, str):
-                    doi = doi or cand_doi
-                elif isinstance(cand_doi, dict):
-                    doi = doi or cand_doi.get("value") or cand_doi.get("doi")
-                # 类型
-                jtype = art.get("@type") or art.get("type")
-                if isinstance(jtype, list):
-                    jtype = ",".join([str(x) for x in jtype])
-                art_type = str(jtype or "").lower()
-            else:
-                art_type = ""
-    except Exception:
-        art_type = ""
-
-    # 3) 从正文顶部提取“类型 + 人类可读日期”（cookies_not_supported 时尤其需要）
-    body_text = soup.get_text("\n", strip=True)
-
-    # 类型（优先识别强标签）
-    type_badge = None
-    badge = soup.find(string=_re.compile(r'^(NEWS|RESEARCH HIGHLIGHT|EDITORIAL|COMMENT|CAREERS|NEWS & VIEWS)$', _re.I))
-    if badge:
-        type_badge = badge.strip().title()
-    else:
-        m_badge = _re.search(r'\b(NEWS|RESEARCH HIGHLIGHT|EDITORIAL|COMMENT|CAREERS|NEWS & VIEWS)\b', body_text, _re.I)
-        if m_badge:
-            type_badge = m_badge.group(1).title()
-
-    # 3.a Published 文本（允许冒号可选）
-    if _is_incomplete_date(date_pub):
-        m_pub = _re.search(r'Published:?\s+([0-9]{1,2}\s+[A-Za-z]+\s+[0-9]{4})', body_text, _re.I)
-        if m_pub:
-            parsed = _parse_date_human(m_pub.group(1))
-            if _is_full_ymd(parsed):
-                date_pub = parsed
-
-    # 3.b 直接利用 <time datetime="YYYY-MM-DD">（更稳）
-    if _is_incomplete_date(date_pub):
-        # 优先定位“Published …”项里的 time[datetime]
-        time_candidate = None
-        # 针对 Nature 页面结构的出版信息区块
-        hist_list = soup.find("ul", attrs={"data-test": _re.compile(r"publication-history", _re.I)})
-        if hist_list:
-            # 在包含 "Published" 文本的项里找 time[datetime]
-            for li in hist_list.find_all("li"):
-                txt = li.get_text(" ", strip=True)
-                if _re.search(r'\bPublished\b', txt, _re.I):
-                    t = li.find("time", attrs={"datetime": True})
-                    if t and t.get("datetime"):
-                        time_candidate = t.get("datetime").strip()
-                        break
-        # 如果上面没找到，就退而在全页找一个 time[datetime]
-        if not time_candidate:
-            t = soup.find("time", attrs={"datetime": True})
-            if t and t.get("datetime"):
-                time_candidate = t.get("datetime").strip()
-
-        if time_candidate:
-            # 只取 YYYY-MM-DD 或者前 10 位
-            d = time_candidate[:10] if len(time_candidate) >= 10 else time_candidate
-            if _is_full_ymd(d):
-                date_pub = d
-
-    # DOI 兜底：正文可能有 “DOI: https://doi.org/…”
-    if not doi:
-        m_doi = _re.search(r'\b10\.\d{4,9}/\S+\b', body_text)
-        if m_doi:
-            doi = m_doi.group(0)
-
-    # 期刊兜底：面包屑/页眉里通常会出现 “Nature Biotechnology”/“Nature”
-    if not journal:
-        # 取面包屑里第二个或页面大标题区域的期刊名
-        crumb = soup.find("ol", attrs={"aria-label": _re.compile("breadcrumb", _re.I)}) or soup.find("nav", attrs={"aria-label": _re.compile("breadcrumb", _re.I)})
-        if crumb:
-            items = [a.get_text(" ", strip=True) for a in crumb.find_all("a")]
-            if len(items) >= 2:
-                # 例如 ["nature", "nature biotechnology", "news"] -> 取第 2 个做期刊名
-                cand = (items[1] or "").strip()
-                if cand:
-                    journal = cand.title()
-        # 兜底：页脚里常显示 “Nature Biotechnology (Nat Biotechnol)”
-        if not journal:
-            foot = soup.find(string=_re.compile(r'Nature\s+[A-Za-z ]+\s+\(Nat', _re.I)) or soup.find(string=_re.compile(r'^Nature\s*$', _re.I))
-            if foot:
-                journal = foot.strip()
-
-    # 文章摘要兜底：正文第一段
+    # --- 摘要（优先 meta；特殊值“Letter to the Editor”时转为正文首段）---
     abstract = None
+    meta_abs = _get_meta("dc.description") or _get_meta("description")
+    if meta_abs and meta_abs.strip().casefold() == "letter to the editor":
+        # 从正文容器抓第一个段落
+        main = soup.find(
+            "div",
+            class_=_re.compile(r"\bc-article-body\b.*\bmain-content\b", _re.I),
+            attrs={"data-test": _re.compile(r"^main-content$", _re.I)},
+        ) or soup.select_one("div.c-article-body.main-content[data-test='main-content']")
+        if main:
+            p = main.find("p")
+            abstract = _text_of(p)
+    else:
+        abstract = meta_abs
+
+    # 若还没有摘要，退回到 section 摘要区块
     if not abstract:
-        art = soup.find("article") or soup
-        first_p = art.find("p")
-        abstract = _first_text(first_p)
+        abs_section = soup.find("section", id=_re.compile(r"^Abs\d+", _re.I)) \
+                    or soup.find("section", attrs={"data-title": _re.compile(r"abstract", _re.I)})
+        if abs_section:
+            p = abs_section.find("p")
+            abstract = _text_of(p)
 
-    # 类型最终确定：JSON-LD 的类型 + 可视化徽章二选一
-    type_final = (type_badge or art_type or None)
-    if type_final:
-        # 标准化几个常见值
-        t = type_final.lower()
-        if "research highlight" in t:
-            type_final = "Research Highlight"
-        elif "news" in t:
-            type_final = "News"
-        elif "editorial" in t:
-            type_final = "Editorial"
-        elif "comment" in t:
-            type_final = "Comment"
-        elif "careers" in t:
-            type_final = "Careers"
+    # 再退回 teaser 首段
+    if not abstract:
+        teaser = soup.find("div", class_=_re.compile(r"\barticle__teaser\b"))
+        if teaser:
+            p = teaser.find("p")
+            abstract = _text_of(p)
 
-    # 规范 DOI
-    if doi and doi.lower().startswith("doi:"):
-        doi = doi[4:].strip()
-    if doi and doi.lower().startswith("https://doi.org/"):
-        doi = doi[len("https://doi.org/"):]
+    # --- 期刊 ---
+    journal = _get_meta("citation_journal_title") or _get_meta("prism.publicationName")
+    if not journal:
+        crumb = soup.find(lambda t: t.name in ("ol", "nav") and
+                          t.get("aria-label") and _re.search(r"breadcrumb", t.get("aria-label"), _re.I))
+        if crumb:
+            links = [a.get_text(" ", strip=True) for a in crumb.find_all("a")]
+            if len(links) >= 2:
+                cand = (links[1] or "").strip()
+                journal = cand or None
 
-    # 最终日期规范化：尽力转成 YYYY-MM-DD；否则保持到月/到年
-    date_pub = _normalize_date_keep_precision(date_pub)
+    # --- DOI ---
+    doi = _get_meta("citation_doi")
+    if not doi:
+        ident = _get_meta("dc.identifier")
+        if ident and _re.search(r"\b10\.\d{4,9}/\S+\b", ident):
+            doi = ident
+    if doi:
+        d = doi.strip()
+        if d.lower().startswith("doi:"):
+            d = d[4:].strip()
+        if d.lower().startswith("https://doi.org/"):
+            d = d[len("https://doi.org/"):].strip()
+        doi = d or None
+
+    # --- 出版日期 ---
+    date_published = None
+    hist_list = soup.find("ul", attrs={"data-test": _re.compile(r"publication-history", _re.I)})
+    if hist_list:
+        for li in hist_list.find_all("li"):
+            txt = _text_of(li)
+            if txt and _re.search(r"\bPublished\b", txt, _re.I):
+                t = li.find("time", attrs={"datetime": True})
+                if t and t.get("datetime"):
+                    iso = t["datetime"].strip()
+                    if len(iso) >= 10 and _re.match(r"^\d{4}-\d{2}-\d{2}$", iso[:10]):
+                        date_published = iso[:10]
+                        break
+    if not date_published:
+        cod = _get_meta("citation_online_date")
+        if cod and len(cod) >= 10 and _re.match(r"^\d{4}-\d{2}-\d{2}$", cod[:10]):
+            date_published = cod[:10]
+
+    # --- 类型（仅 citation_article_type）---
+    type_raw = _get_meta("citation_article_type")
+    type_final = type_raw.strip() if type_raw else None
 
     rec = {
         "title": title,
         "abstract": abstract,
         "journal": journal,
         "type": type_final,
-        "date_published": date_pub,
+        "date_published": date_published,
         "doi": doi,
         "article_url": url,
-        "raw_jsonld": raw_jsonld,
+        "raw_jsonld": None,
     }
 
-    # 如果核心字段几乎都空，返回 None 让泛化解析继续处理
-    core = any([rec.get("title"), rec.get("date_published"), rec.get("doi"), rec.get("journal")])
-    return rec if core else None
+    core_ok = bool(rec["title"] or rec["doi"] or (rec["journal"] and rec["date_published"]))
+    return rec if core_ok else None
 
 
-
+# headers={"User-Agent": "rss-nature-extractor/3.0 (+https://example.com)"}
+# r = requests.get(url='https://www.nature.com/articles/d41586-025-02795-1', headers=headers)
 # with open("page.html", "w", encoding="utf-8") as f:
 #     f.write(r.text)

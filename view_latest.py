@@ -28,14 +28,14 @@ def main():
     started_at = now_ts()
 
     if args.topics:
-        q = f"""SELECT uid, journal, title_en, pub_date, doi, article_url, topic_tag, fetched_at
+        q = f"""SELECT uid, journal, title_en, pub_date, doi, article_url, topic_tag, fetched_at, abstract_en
                 FROM articles
                 WHERE topic_tag IN ({','.join(['?']*len(args.topics))})
                 ORDER BY datetime(fetched_at) DESC
                 LIMIT ?"""
         rows = list(cur.execute(q, [*args.topics, args.limit]))
     else:
-        q = """SELECT uid, journal, title_en, pub_date, doi, article_url, topic_tag, fetched_at
+        q = """SELECT uid, journal, title_en, pub_date, doi, article_url, topic_tag, fetched_at, abstract_en
                FROM articles
                ORDER BY datetime(fetched_at) DESC
                LIMIT ?"""
@@ -44,10 +44,11 @@ def main():
     lines = []
     lines.append(f"# 最新条目（{datetime.now().isoformat(timespec='seconds')}） 主题: {','.join(args.topics) or 'ALL'}")
     for i, r in enumerate(rows, 1):
-        uid, journal, title, pub_date, doi, url, topic, fetched_at = r
+        uid, journal, title, pub_date, doi, url, topic, fetched_at, abstract_en = r
         lines.append(f"{i}. [{topic or '其他'}] {journal or 'Unknown'} | {pub_date or ''} | {title or ''}")
         if doi: lines.append(f"   DOI: {doi}")
         if url: lines.append(f"   URL: {url}")
+        if abstract_en: lines.append(f"   摘要: {abstract_en}")
         lines.append(f"   fetched_at: {fetched_at}")
 
     out_text = "\n".join(lines) + "\n"

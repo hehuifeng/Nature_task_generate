@@ -1,0 +1,21 @@
+{
+  "feeds": [
+    "your-feed-url1-here",
+    "your-feed-url2-here",
+    "your-feed-url3-here",
+    "your-feed-url4-here",
+    "your-feed-url5-here",
+    "your-feed-url6-here"
+  ],
+  "db": "./rss_state.db",
+  "out_dir": "./reports",
+  "http_timeout": 25,
+  "sleep_between_fetches": 0.5,
+
+  "openai": {
+    "api_key": "your-api-key-here",
+    "base_url": "your-base-url-here",
+    "model": "your-model-here",
+    "classifier": false          
+  }
+}
