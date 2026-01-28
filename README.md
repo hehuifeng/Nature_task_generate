@@ -1,3 +1,5 @@
+> 📌 **数据呈现（在线预览）**：请跳转至 https://hehuifeng.github.io/rss_site/
+
 # Nature Task Generate
 
 自然学术文章 RSS 抽取与日报生成工具链。项目聚合多个脚本：从 RSS 订阅源抓取最新论文，提取元数据、主题打标、可选的中英翻译，并存入 SQLite 数据库；随后可生成 Markdown 日报或快速查看最新记录。
